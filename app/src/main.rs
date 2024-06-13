@@ -1,13 +1,16 @@
 use actix_cors::Cors;
-use actix_web::{web, App, HttpServer, HttpResponse, Responder};
-use geo::{Point, Polygon, LineString, Contains, HaversineDistance};
-use geojson::{GeoJson, Value};
-use serde::Deserialize;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use std::fs::File;
-use std::io::{BufReader, Read};
 use actix_files as fs;
+use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use geo::{Contains, HaversineDistance, LineString, Point, Polygon};
+use geojson::{GeoJson, Value};
+use rayon::prelude::*;
+use serde::Deserialize;
+use std::{fs::File, io::{BufReader, Read}, sync::Arc, collections::HashSet}; use tokio::sync::RwLock;
+use std::time::Instant;
+use rstar::{RTree, RTreeObject, AABB};
+
+use futures::future::join_all;
+
 
 #[derive(Deserialize, Debug)]
 struct Location {
@@ -39,26 +42,52 @@ async fn get_nearby_locations(data: web::Data<AppState>, location: web::Json<Loc
 
     let point = Point::new(location.longitude, location.latitude);
     let radius_km = location.radius_km.unwrap_or(10.0); // Default radius 10 km if not specified
+    let radius_m = radius_km * 1000.0; // Default radius 10 km if not specified
     let sort_by = location.sort_by.as_deref().unwrap_or("distance"); // Default sort by distance
     let polygons = data.polygons.read().await;
-    let mut nearby_locations = vec![];
+    let polygons_ref = &*polygons; // Get a reference to the vector
 
-    //==== 簡易計算
-    for (poly, prefecture, city) in polygons.iter() {
-        for coord in poly.exterior().0.iter() {
-            let vertex = Point::new(coord.x, coord.y);
-            let distance = point.haversine_distance(&vertex) / 1000.0; // convert to kilometers
-            if distance <= radius_km {
-                // Check if the location is already added
-                if !nearby_locations.iter().any(|(_, p, c)| p == prefecture && c == city) {
-                    nearby_locations.push((distance, prefecture.clone(), city.clone()));
-                    break; // Stop checking other vertices once added
+    // Use rayon's par_chunks method on the vector reference
+    let polygons_chunks: Vec<_> = polygons_ref.par_chunks(polygons_ref.len() / 500).collect();
+    let start_time = Instant::now();
+
+    let futures = polygons_chunks.into_iter().map(|chunk| {
+        let point = point.clone();
+        let radius_m = radius_m.clone();
+        async move {
+            let mut local_nearby_locations = vec![];
+            for (poly, prefecture, city) in chunk.iter() {
+                for coord in poly.exterior().0.iter() {
+                    let vertex = Point::new(coord.x, coord.y);
+                    let distance = point.haversine_distance(&vertex);
+                    if distance <= radius_m {
+                        // Check if the location is already added
+                        if !local_nearby_locations.iter().any(|(_, p, c)| p == prefecture && c == city) {
+                            local_nearby_locations.push((distance, prefecture.clone(), city.clone()));
+                            break; // Stop checking other vertices once added
+                        }
+                    }
                 }
+            }
+            local_nearby_locations
+        }
+    });
+
+    let results = join_all(futures).await;
+    let mut nearby_locations = vec![];
+    let mut unique_check = HashSet::new();
+
+    for result in results {
+        for (distance, prefecture, city) in result {
+            if unique_check.insert((prefecture.clone(), city.clone())) {
+                nearby_locations.push((distance, prefecture, city));
             }
         }
     }
 
-
+    let duration = start_time.elapsed();
+    println!("処理に掛かった時間: {:.3}秒", duration.as_secs_f64());
+    println!("見つかった件数: {}", nearby_locations.len());
     // Sort and group by the specified method
     if sort_by == "prefecture" {
         // Group by prefecture and find minimum distance for each prefecture
@@ -105,7 +134,15 @@ async fn main() -> std::io::Result<()> {
     println!("Reading GeoJSON file...");
     reader.read_to_string(&mut content).expect("Failed to read GeoJSON file");
     println!("Parsing JSON data...");
+    let start_parse_time = std::time::SystemTime::now();
     let geojson: GeoJson = content.parse().expect("Failed to parse GeoJSON");
+    let end_parse_time = std::time::SystemTime::now();
+    let parse_duration = end_parse_time.duration_since(start_parse_time).expect("Time went backwards");
+    println!("GeoJSONの解析に{:.3}秒かかりました", parse_duration.as_secs_f64());
+    // let geojson = serde_json::from_slice::<GeoJson>(&geojson_str).expect("Failed to parse GeoJSON");
+
+    let start_time = std::time::SystemTime::now();
+    let start_millis = start_time.duration_since(std::time::UNIX_EPOCH).expect("Time went backwards").as_millis();
 
     let mut polygons = Vec::new();
     println!("Processing Polygon data...");
@@ -123,6 +160,9 @@ async fn main() -> std::io::Result<()> {
             }
         }
     }
+
+    
+
     println!("=== server start ====");
 
     let app_state = web::Data::new(AppState {
