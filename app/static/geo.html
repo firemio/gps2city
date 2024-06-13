@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>現在位置の県市判別</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/semantic-ui/2.4.1/semantic.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/skeleton/2.0.4/skeleton.min.css">
+</head>
+<body>
+    <p>GPSから日本の政令区画を返す</p>
+    <div class="container">
+        <h1>現在位置の県市判別</h1>
+        <button class="button-primary" onclick="getLocation()">現在位置を取得</button>
+        <div class="message">
+            <p id="location"></p>
+            <p id="address"></p>
+        </div>
+
+        <h1>近くの場所を検索</h1>
+        <div class="form">
+            <div class="row">
+                <div class="six columns">
+                    <label for="radius_km">半径 (km):</label>
+                    <input class="u-full-width" type="text" id="radius_km" name="radius_km" value="10">
+                </div>
+                <div class="six columns">
+                    <label for="sort_by">並び替え:</label>
+                    <select class="u-full-width" id="sort_by" name="sort_by">
+                        <option value="distance">距離順</option>
+                        <option value="prefecture">県順</option>
+                    </select>
+                </div>
+            </div>
+            <button class="button button-primary" onclick="getNearbyLocations()">近くの場所を検索</button>
+        </div>
+        <ul id="results" class="list"></ul>
+    </div>
+
+    <script>
+        window.onload = function() {
+            getLocation();
+        };
+
+        async function getLocation() {
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition(showPosition, showError);
+            } else {
+                document.getElementById("location").innerHTML = "Geolocation is not supported by this browser.";
+            }
+        }
+
+        async function showPosition(position) {
+            const { latitude: lat, longitude: lon } = position.coords;
+            document.getElementById("location").innerHTML = `Latitude: ${lat} <br>Longitude: ${lon}`;
+
+            try {
+                const response = await fetch('location', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ latitude: lat, longitude: lon })
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    document.getElementById("address").innerHTML = `都道府県: ${data.prefecture}, 市区町村: ${data.city}`;
+                } else {
+                    document.getElementById("address").innerHTML = "県が判別できませんでした。";
+                }
+            } catch (error) {
+                document.getElementById("address").innerHTML = "サーバーとの通信に失敗しました。";
+            }
+        }
+
+        async function getNearbyLocations() {
+            if (navigator.geolocation) {
+                document.getElementById("results").innerHTML = "";
+                navigator.geolocation.getCurrentPosition(async (position) => {
+                    const { latitude: lat, longitude: lon } = position.coords;
+                    const radius_km = parseFloat(document.getElementById("radius_km").value);
+                    const sort_by = document.getElementById("sort_by").value;
+
+                    try {
+                        const response = await fetch('location2', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ latitude: lat, longitude: lon, radius_km, sort_by })
+                        });
+
+                        if (response.ok) {
+                            const data = await response.json();
+                            const resultsList = document.getElementById("results");
+                            resultsList.innerHTML = "";
+                            data.forEach(location => {
+                                const listItem = document.createElement("li");
+                                listItem.textContent = `都道府県: ${location.prefecture}, 市区町村: ${location.city}, 距離: ${location.distance.toFixed(2)} km`;
+                                resultsList.appendChild(listItem);
+                            });
+                        } else {
+                            document.getElementById("results").innerHTML = "検索結果が見つかりませんでした。";
+                        }
+                    } catch (error) {
+                        document.getElementById("results").innerHTML = "サーバーとの通信に失敗しました。";
+                    }
+                }, (error) => {
+                    document.getElementById("results").innerHTML = "位置情報の取得に失敗しました。";
+                });
+            } else {
+                document.getElementById("results").innerHTML = "Geolocation is not supported by this browser.";
+            }
+        }
+
+        function showError(error) {
+            const errorMessages = {
+                [error.PERMISSION_DENIED]: "User denied the request for Geolocation.",
+                [error.POSITION_UNAVAILABLE]: "Location information is unavailable.",
+                [error.TIMEOUT]: "The request to get user location timed out.",
+                [error.UNKNOWN_ERROR]: "An unknown error occurred."
+            };
+            document.getElementById("location").innerHTML = errorMessages[error.code] || "An unknown error occurred.";
+        }
+    </script>
+</body>
+</html>

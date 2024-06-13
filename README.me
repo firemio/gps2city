@@ -1,0 +1,32 @@
+### gps2city (japan)
+
+## 導入方法
+一応CORS解放しとくけど、簡単に導入できるので、各自用意してくれ。
+geoデータが500Mほどある。
+
+.envファイルを設定し
+docker compose up -d
+
+### GPSから行政区域を取得する
+
+## 機能１
+GPSから現在の(県,市町村)を取得
+
+## 機能２
+GPSから範囲内の(県,市町村,距離)の一覧を取得
+
+※簡易計算の為、以下の不具合があります。
+緯度経度が同じで、探索距離によって結果に誤差が出る
+範囲4.5kmで探索し、結果が新宿4.4km
+範囲5kmで探索し、結果が新宿5.0km
+
+
+
+
+# 行政区域データ
+https://nlftp.mlit.go.jp/ksj/gml/datalist/KsjTmplt-N03-2024.html
+
+# 位置参照データ
+https://nlftp.mlit.go.jp/isj/index.html
+
+
