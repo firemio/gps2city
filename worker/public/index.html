@@ -9,7 +9,7 @@
 </head>
 <body>
     <div class="container">
-        <p>GPSから日本の政令区画を返す</p>
+        <p>緯度経度から日本の市区町村 (政令市は区まで) を返します</p>
 
         <h1>現在位置の県市判別</h1>
         <button class="button-primary" onclick="getLocation()">現在位置を取得</button>
@@ -36,6 +36,8 @@
             <button class="button button-primary" onclick="getNearbyLocations()">近くの場所を検索</button>
         </div>
         <ul id="results" class="list"></ul>
+        <p><small>出典: 「国土数値情報（行政区域データ）」（国土交通省）（https://nlftp.mlit.go.jp/ksj/gml/datalist/KsjTmplt-N03-2024.html）を加工して作成
+            ／ 作者: <a href="https://github.com/firemio">firemio</a> ／ <a href="https://github.com/firemio/gps2city">ソースコード</a></small></p>
     </div>
 
     <script>

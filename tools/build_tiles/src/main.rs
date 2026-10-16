@@ -76,7 +76,7 @@ struct Tile {
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let input = args.get(1).map(String::as_str).unwrap_or("japan.geojson");
-    let output = Path::new(args.get(2).map(String::as_str).unwrap_or("../worker/data/tiles.pack"));
+    let output = Path::new(args.get(2).map(String::as_str).unwrap_or("../../worker/data/tiles.pack"));
     let tolerance_m: f64 = args.get(3).map_or(1.0, |s| s.parse().expect("tolerance must be a number (meters)"));
 
     let started = Instant::now();
