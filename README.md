@@ -106,6 +106,11 @@ SHA-256 `8510c1a0a21099c6498b967318f943f3d6cd5a726c57a5aae26007931d73fd96` が�
 「国土数値情報（行政区域データ）」（国土交通省）（https://nlftp.mlit.go.jp/ksj/gml/datalist/KsjTmplt-N03-2024.html）を加工して作成。
 N03-2024 (2024年1月1日時点) の境界線を間引き・タイル分割して使用しています (CC BY 4.0)。
 
+## ライセンス
+
+- ソースコードと文書: [MIT License](LICENSE) (Copyright (c) 2024-2026 firemio)
+- 生成したタイルのパック: 「国土数値情報」の利用条件 (CC BY 4.0) に従います (上の出典の表示が必要です)
+
 ## 履歴
 
 最初の版は actix-web の常駐サーバー (Docker + Traefik) でした。Cloudflare Workers 版への移行に伴い削除しています。
