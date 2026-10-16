@@ -1,0 +1,13 @@
+[package]
+name = "build_tiles"
+version = "0.1.0"
+edition = "2021"
+description = "国土数値情報 N03 の GeoJSON を、Worker に埋め込むタイルのパックにする"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1

@@ -1,9 +1,9 @@
 //! タイルの読み込みと、点の所属判定・近傍検索。Workers に依存しない純粋な計算部分。
-//! パック・タイルの形式は app/src/bin/build_tiles.rs を参照。
+//! パック・タイルの形式は tools/build_tiles/src/main.rs を参照。
 
 use std::collections::HashMap;
 
-// app/src/bin/build_tiles.rs と同じ値にすること
+// tools/build_tiles/src/main.rs と同じ値にすること
 pub const TILES_PER_DEG: f64 = 10.0;
 const TILE_SIZE: f64 = 1.0 / TILES_PER_DEG;
 const STEP: f64 = 1e-6;

@@ -2,7 +2,7 @@
   "name": "gps2city-worker",
   "private": true,
   "scripts": {
-    "tiles": "cd ../app && cargo run --release --bin build_tiles -- japan.geojson ../worker/data/tiles.pack",
+    "tiles": "cd ../tools/build_tiles && cargo run --release -- japan.geojson ../../worker/data/tiles.pack",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy"
   },

@@ -2,5 +2,5 @@
 /build
 /node_modules
 /.wrangler
-# app/ の build_tiles で生成する (Worker に埋め込む)
+# tools/build_tiles で生成する (Worker に埋め込む)
 /data

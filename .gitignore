@@ -1,0 +1,10 @@
+# Rust / Node のビルド成果物
+target/
+node_modules/
+
+# 入力の行政区域 GeoJSON (約450MB。README の手順で取得する)
+*.geojson
+
+# secrets
+.env
+.dev.vars

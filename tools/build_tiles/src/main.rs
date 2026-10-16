@@ -1,6 +1,6 @@
 //! japan.geojson を 0.1° 四方のタイルに分割し、Workers 版 (worker/) に埋め込む 1 本のファイルに書き出す。
 //!
-//!   cargo run --release --bin build_tiles -- japan.geojson ../worker/data/tiles.pack [許容誤差m (既定 1)]
+//!   cargo run --release -- japan.geojson ../../worker/data/tiles.pack [許容誤差m (既定 1)]
 //!
 //! 境界線は Douglas–Peucker で許容誤差まで間引き、タイル境界で切り取って (Sutherland–Hodgman) 保存する。
 //! 切り取りで生じた辺は必ずタイル境界線上に乗るので、Worker 側はそれを見分けて距離計算から除外する。
