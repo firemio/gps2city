@@ -1,0 +1,12 @@
+name = "gps2city"
+main = "build/index.js"
+compatibility_date = "2026-10-01"
+
+[build]
+command = "cargo install -q --locked \"worker-build@^0.8\" && worker-build --release"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+# タイルを直接ダウンロードさせず、Worker 経由でだけ読む
+run_worker_first = ["/data/*"]

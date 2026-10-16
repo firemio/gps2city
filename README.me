@@ -21,6 +21,27 @@ GPSから範囲内の(県,市町村,距離)の一覧を取得
 範囲5kmで探索し、結果が新宿5.0km
 
 
+## Cloudflare Workers 版 (worker/)
+    VPS 不要。全国を 0.1° 四方のタイル (約5,000個, 計124MB) に分け、
+    リクエストごとに必要なタイルだけを読む。距離は境界線までの正確な距離 (含まれる市区町村は 0)。
+
+    準備 (初回のみ)
+        rustup target add wasm32-unknown-unknown
+        cd worker && npm install
+
+    タイル生成 (app/japan.geojson から worker/public/data/ に出力)
+        npm run tiles
+
+    ローカルで動かす (http://127.0.0.1:8787)
+        npm run dev
+
+    デプロイ
+        npx wrangler login
+        npm run deploy
+
+    VPS 版との違い
+        /location  の prefecture / city に余計な引用符が付かない ("\"新宿区\"" → "新宿区")
+        /location2 の distance は境界線までの距離 (m)。radius_km は 50 まで
 
 
 # 行政区域データ

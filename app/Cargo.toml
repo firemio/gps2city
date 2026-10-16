@@ -2,6 +2,7 @@
 name = "geo_location"
 version = "0.1.0"
 edition = "2021"
+default-run = "geo_location"  # ここにデフォルトの実行バイナリ名を追加
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
