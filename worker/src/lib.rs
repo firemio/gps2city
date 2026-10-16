@@ -56,7 +56,13 @@ async fn handle_location(mut req: Request, env: &Env) -> Result<Response> {
     let key = lookup::tile_index(loc.longitude, loc.latitude);
     let tiles = load_tiles(env, &[key]).await?;
     match tiles.first().and_then(|t| t.locate(loc.longitude, loc.latitude)) {
-        Some(area) => Response::from_json(&json!({ "prefecture": area.prefecture, "city": area.city })),
+        Some(area) => Response::from_json(&json!({
+            "prefecture": area.prefecture,
+            "city": area.city,
+            "ward": area.ward,
+            "code": area.code,
+            "lg_code": lookup::lg_code(&area.code),
+        })),
         None => Response::from_json(&json!({ "error": "Location not found" })).map(|r| r.with_status(404)),
     }
 }
@@ -96,7 +102,23 @@ async fn handle_nearby(mut req: Request, env: &Env) -> Result<Response> {
     };
     let body: Vec<_> = sorted
         .iter()
-        .map(|Nearby { prefecture, city, distance_m }| json!({ "prefecture": prefecture, "city": city, "distance": distance_m }))
+        .map(|Nearby { prefecture, city, distance_m, areas }| {
+            // 区に分かれない市区町村は code / lg_code を直接持つ。政令市は areas (区ごと) を見る
+            let single = (areas.len() == 1 && areas[0].ward.is_empty()).then(|| &areas[0].code);
+            json!({
+                "prefecture": prefecture,
+                "city": city,
+                "distance": distance_m,
+                "code": single,
+                "lg_code": single.and_then(|c| lookup::lg_code(c)),
+                "areas": areas.iter().map(|a| json!({
+                    "ward": a.ward,
+                    "code": a.code,
+                    "lg_code": lookup::lg_code(&a.code),
+                    "distance": a.distance_m,
+                })).collect::<Vec<_>>(),
+            })
+        })
         .collect();
     Response::from_json(&body)
 }

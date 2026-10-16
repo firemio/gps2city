@@ -21,11 +21,20 @@ fn border_hi() -> f32 {
 }
 
 pub struct Area {
-    pub code: String,
+    pub code: String, // N03_007 (5桁の行政区域コード。政令市は区のコード)
     pub prefecture: String,
     pub city: String,
-    #[allow(dead_code)] // 政令市の区 (N03_005)。API ではまだ返していない
-    pub ward: String,
+    pub ward: String, // 政令市の区 (N03_005)。それ以外は空
+}
+
+/// 5桁の行政区域コードに検査数字を付けた6桁の全国地方公共団体コード
+/// (デジタル庁 アドレス・ベース・レジストリの lg_code と同じ)。5桁の数字でなければ None。
+pub fn lg_code(code: &str) -> Option<String> {
+    if code.len() != 5 || !code.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let sum: u32 = code.bytes().zip([6, 5, 4, 3, 2]).map(|(b, w)| (b - b'0') as u32 * w).sum();
+    Some(format!("{code}{}", (11 - sum % 11) % 10))
 }
 
 struct Polygon {
@@ -134,6 +143,13 @@ pub struct Nearby {
     pub prefecture: String,
     pub city: String,
     pub distance_m: f64,
+    pub areas: Vec<NearbyArea>, // まとめる前の行政区域 (政令市なら区ごと)。距離順
+}
+
+pub struct NearbyArea {
+    pub code: String,
+    pub ward: String,
+    pub distance_m: f64,
 }
 
 /// 半径 radius_m 以内にある (都道府県, 市区町村) と、その境界までの距離。点を含む市区町村は距離 0。
@@ -180,18 +196,24 @@ pub fn nearby(tiles: &[&Tile], lon: f64, lat: f64, radius_m: f64) -> Vec<Nearby>
         }
     }
 
-    // 政令市の区などは同じ (都道府県, 市区町村) にまとめる
-    let mut merged: HashMap<(&str, &str), f64> = HashMap::new();
+    // 政令市の区などは同じ (都道府県, 市区町村) にまとめ、区ごとの距離は areas に残す
+    let mut merged: HashMap<(&str, &str), Vec<NearbyArea>> = HashMap::new();
     for (d2, nlon, nlat, area) in best.into_values() {
         let d = if d2 == 0.0 { 0.0 } else { haversine(lon, lat, nlon, nlat) };
         if d <= radius_m {
-            let e = merged.entry((&area.prefecture, &area.city)).or_insert(f64::INFINITY);
-            *e = e.min(d);
+            merged.entry((&area.prefecture, &area.city)).or_default().push(NearbyArea {
+                code: area.code.clone(),
+                ward: area.ward.clone(),
+                distance_m: d,
+            });
         }
     }
     merged
         .into_iter()
-        .map(|((p, c), d)| Nearby { prefecture: p.to_string(), city: c.to_string(), distance_m: d })
+        .map(|((p, c), mut areas)| {
+            areas.sort_by(|a, b| a.distance_m.total_cmp(&b.distance_m).then_with(|| a.code.cmp(&b.code)));
+            Nearby { prefecture: p.to_string(), city: c.to_string(), distance_m: areas[0].distance_m, areas }
+        })
         .collect()
 }
 

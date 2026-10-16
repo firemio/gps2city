@@ -64,7 +64,7 @@
 
                 if (response.ok) {
                     const data = await response.json();
-                    document.getElementById("address").innerHTML = `都道府県: ${data.prefecture}, 市区町村: ${data.city}`;
+                    document.getElementById("address").innerHTML = `都道府県: ${data.prefecture}, 市区町村: ${data.city}${data.ward ? ' ' + data.ward : ''} (コード: ${data.lg_code})`;
                 } else {
                     document.getElementById("address").innerHTML = "県が判別できませんでした。";
                 }
