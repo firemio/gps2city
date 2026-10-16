@@ -22,14 +22,16 @@ GPSから範囲内の(県,市町村,距離)の一覧を取得
 
 
 ## Cloudflare Workers 版 (worker/)
-    VPS 不要。全国を 0.1° 四方のタイル (約5,000個, 計124MB) に分け、
-    リクエストごとに必要なタイルだけを読む。距離は境界線までの正確な距離 (含まれる市区町村は 0)。
+    VPS 不要。全国を 0.1° 四方のタイル (約5,000個) に分け、境界線を 1m の誤差で間引いて
+    1 本のパック (約23MB) にまとめ、Worker 本体に埋め込む。リクエストごとに必要なタイルだけを展開するので、
+    外部ストレージへの読み込みが無く、初めての地点でも約10msで返る。
+    距離は境界線までの距離 (含まれる市区町村は 0)。間引きによる誤差は 1m 以内。
 
     準備 (初回のみ)
         rustup target add wasm32-unknown-unknown
         cd worker && npm install
 
-    タイル生成 (app/japan.geojson から worker/public/data/ に出力)
+    タイル生成 (app/japan.geojson から worker/data/tiles.pack に出力。ビルド前に必要)
         npm run tiles
 
     ローカルで動かす (http://127.0.0.1:8787)

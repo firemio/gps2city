@@ -1,9 +1,9 @@
 //! gps2city の Cloudflare Workers 版。
-//! タイル (public/data/tiles/*.bin) を ASSETS バインディングから必要な分だけ読み、isolate 内にキャッシュする。
+//! 全国のタイルを 1 本のパック (data/tiles.pack) にして Worker に埋め込み、必要なタイルだけを展開して
+//! isolate 内にキャッシュする。外部からの読み込みが無いので、初回アクセスでも待ち時間が出ない。
 
 mod lookup;
 
-use futures::future::join_all;
 use lookup::{Nearby, Tile};
 use serde::Deserialize;
 use serde_json::json;
@@ -14,7 +14,11 @@ use worker::*;
 
 const DEFAULT_RADIUS_KM: f64 = 10.0;
 const MAX_RADIUS_KM: f64 = 50.0;
-const CACHE_LIMIT_BYTES: usize = 48 << 20; // isolate のメモリ上限は 128MB
+const CACHE_LIMIT_BYTES: usize = 32 << 20; // isolate のメモリ上限は 128MB (うちパックが約 23MB)
+// 境界線は build_tiles で 1m まで間引いてある。隣のエリアとの間にできた隙間に落ちた点は、この距離までなら最寄りのエリアにする
+const SNAP_M: f64 = 2.0;
+
+static PACK: &[u8] = include_bytes!("../data/tiles.pack");
 
 #[derive(Deserialize, Debug)]
 struct Location {
@@ -38,24 +42,25 @@ thread_local! {
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let result = match (req.method(), req.path().as_str()) {
         (Method::Options, _) => Response::empty().map(|r| r.with_status(204)),
-        (Method::Post, "/location") => handle_location(req, &env).await,
-        (Method::Post, "/location2") => handle_nearby(req, &env).await,
-        // タイルは Worker 経由でのみ読む (wrangler.toml の run_worker_first で直接配信を止めている)
-        (_, path) if path.starts_with("/data/") => Response::error("Not Found", 404),
+        (Method::Post, "/location") => handle_location(req).await,
+        (Method::Post, "/location2") => handle_nearby(req).await,
         _ => return env.assets("ASSETS")?.fetch_request(req).await,
     };
     let resp = result.or_else(|e| Response::from_json(&json!({ "error": e.to_string() })).map(|r| r.with_status(500)))?;
     with_cors(resp)
 }
 
-async fn handle_location(mut req: Request, env: &Env) -> Result<Response> {
+async fn handle_location(mut req: Request) -> Result<Response> {
     let loc = match parse(&mut req).await {
         Ok(loc) => loc,
         Err(resp) => return resp,
     };
     let key = lookup::tile_index(loc.longitude, loc.latitude);
-    let tiles = load_tiles(env, &[key]).await?;
-    match tiles.first().and_then(|t| t.locate(loc.longitude, loc.latitude)) {
+    let (tiles, stats) = load_tiles(&[key])?;
+    let found = tiles.first().and_then(|t| {
+        t.locate(loc.longitude, loc.latitude).or_else(|| t.nearest(loc.longitude, loc.latitude, SNAP_M))
+    });
+    let resp = match found {
         Some(area) => Response::from_json(&json!({
             "prefecture": area.prefecture,
             "city": area.city,
@@ -64,10 +69,11 @@ async fn handle_location(mut req: Request, env: &Env) -> Result<Response> {
             "lg_code": lookup::lg_code(&area.code),
         })),
         None => Response::from_json(&json!({ "error": "Location not found" })).map(|r| r.with_status(404)),
-    }
+    };
+    stats.annotate(resp?)
 }
 
-async fn handle_nearby(mut req: Request, env: &Env) -> Result<Response> {
+async fn handle_nearby(mut req: Request) -> Result<Response> {
     let loc = match parse(&mut req).await {
         Ok(loc) => loc,
         Err(resp) => return resp,
@@ -78,7 +84,7 @@ async fn handle_nearby(mut req: Request, env: &Env) -> Result<Response> {
     }
     let radius_m = radius_km * 1000.0;
     let keys = lookup::tiles_in_radius(loc.longitude, loc.latitude, radius_m);
-    let tiles = load_tiles(env, &keys).await?;
+    let (tiles, stats) = load_tiles(&keys)?;
     let refs: Vec<&Tile> = tiles.iter().map(Rc::as_ref).collect();
     let mut found = lookup::nearby(&refs, loc.longitude, loc.latitude, radius_m);
 
@@ -120,7 +126,7 @@ async fn handle_nearby(mut req: Request, env: &Env) -> Result<Response> {
             })
         })
         .collect();
-    Response::from_json(&body)
+    stats.annotate(Response::from_json(&body)?)
 }
 
 async fn parse(req: &mut Request) -> std::result::Result<Location, Result<Response>> {
@@ -139,51 +145,48 @@ fn bad_request(message: &str) -> Result<Response> {
     Response::from_json(&json!({ "error": message })).map(|r| r.with_status(400))
 }
 
-/// タイルを読み込む。キャッシュに無いものだけ ASSETS から並行して取得する。
-async fn load_tiles(env: &Env, keys: &[(i32, i32)]) -> Result<Vec<Rc<Tile>>> {
-    let (mut tiles, missing) = CACHE.with(|c| {
-        let c = c.borrow();
-        let mut hits = Vec::new();
-        let mut missing = Vec::new();
-        for k in keys {
-            match c.tiles.get(k) {
-                Some(t) => hits.extend(t.clone()),
-                None => missing.push(*k),
+/// タイル読み込みの内訳。Server-Timing ヘッダーで返して本番の計測に使う。
+struct LoadStats {
+    hit: usize,
+    miss: usize,
+}
+
+impl LoadStats {
+    fn annotate(&self, mut resp: Response) -> Result<Response> {
+        let h = resp.headers_mut();
+        h.set("Server-Timing", &format!("tiles;desc=\"hit={} miss={}\"", self.hit, self.miss))?;
+        h.set("Timing-Allow-Origin", "*")?;
+        Ok(resp)
+    }
+}
+
+/// タイルを取り出す。展開済みのものは isolate 内のキャッシュから、それ以外はパックから展開する。
+fn load_tiles(keys: &[(i32, i32)]) -> Result<(Vec<Rc<Tile>>, LoadStats)> {
+    CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        let mut tiles = Vec::with_capacity(keys.len());
+        let mut miss = 0;
+        for &key in keys {
+            if let Some(t) = c.tiles.get(&key) {
+                tiles.extend(t.clone());
+                continue;
             }
-        }
-        (hits, missing)
-    });
-    if !missing.is_empty() {
-        let assets = env.assets("ASSETS")?;
-        let fetched = join_all(missing.iter().map(|&key| {
-            let assets = &assets;
-            async move {
-                let mut resp = assets.fetch(format!("https://assets.local{}", lookup::tile_path(key)), None).await?;
-                if resp.status_code() == 404 {
-                    return Ok::<_, Error>((key, None));
-                }
-                if resp.status_code() != 200 {
-                    return Err(Error::RustError(format!("tile {key:?}: HTTP {}", resp.status_code())));
-                }
-                let tile = Tile::decode(key, &resp.bytes().await?).map_err(Error::RustError)?;
-                Ok((key, Some(Rc::new(tile))))
-            }
-        }))
-        .await;
-        let fetched = fetched.into_iter().collect::<Result<Vec<_>>>()?;
-        tiles.extend(fetched.iter().filter_map(|(_, t)| t.clone()));
-        CACHE.with(|c| {
-            let mut c = c.borrow_mut();
-            let incoming: usize = fetched.iter().map(|(_, t)| t.as_ref().map_or(16, |t| t.approx_bytes())).sum();
-            if c.bytes + incoming > CACHE_LIMIT_BYTES {
-                c.tiles.clear();
+            miss += 1;
+            let tile = match lookup::find_tile(PACK, key).map_err(Error::RustError)? {
+                Some(blob) => Some(Rc::new(Tile::decode(key, blob).map_err(Error::RustError)?)),
+                None => None,
+            };
+            let size = tile.as_ref().map_or(16, |t| t.approx_bytes());
+            if c.bytes + size > CACHE_LIMIT_BYTES {
+                c.tiles.clear(); // 返す分は tiles が保持しているので消えない
                 c.bytes = 0;
             }
-            c.bytes += incoming;
-            c.tiles.extend(fetched);
-        });
-    }
-    Ok(tiles)
+            c.bytes += size;
+            tiles.extend(tile.clone());
+            c.tiles.insert(key, tile);
+        }
+        Ok((tiles, LoadStats { hit: keys.len() - miss, miss }))
+    })
 }
 
 fn with_cors(mut resp: Response) -> Result<Response> {

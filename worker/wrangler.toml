@@ -8,5 +8,3 @@ command = "cargo install -q --locked \"worker-build@^0.8\" && worker-build --rel
 [assets]
 directory = "./public"
 binding = "ASSETS"
-# タイルを直接ダウンロードさせず、Worker 経由でだけ読む
-run_worker_first = ["/data/*"]

@@ -1,29 +1,33 @@
-//! japan.geojson を 0.1° 四方のタイルに分割し、Workers 版 (worker/) が読むバイナリを書き出す。
+//! japan.geojson を 0.1° 四方のタイルに分割し、Workers 版 (worker/) に埋め込む 1 本のファイルに書き出す。
 //!
-//!   cargo run --release --bin build_tiles -- japan.geojson ../worker/public/data
+//!   cargo run --release --bin build_tiles -- japan.geojson ../worker/data/tiles.pack [許容誤差m (既定 1)]
 //!
-//! タイル内のポリゴンはタイル境界で切り取って (Sutherland–Hodgman) 保存する。
+//! 境界線は Douglas–Peucker で許容誤差まで間引き、タイル境界で切り取って (Sutherland–Hodgman) 保存する。
 //! 切り取りで生じた辺は必ずタイル境界線上に乗るので、Worker 側はそれを見分けて距離計算から除外する。
 //!
-//! タイル形式 (リトルエンディアン):
-//!   b"GTL1"
-//!   u16 エリア数, エリアごとに [u8 長さ + UTF-8] × 4 (code, prefecture, city, ward)
-//!   u32 ポリゴン数, ポリゴンごとに
-//!     u16 エリア番号 (このタイル内), u16 リング数, リングごとに
-//!       u32 点数, 点ごとに f32 dx, f32 dy (タイル原点からの度数。閉じ点は含まない)
+//! パック形式 (リトルエンディアン):
+//!   b"GTP1", u32 タイル数, タイルごとに (i32 ix, i32 iy, u32 オフセット, u32 長さ) を (ix, iy) 順に, 続けてタイル本体
+//! タイル本体 (数値はすべて LEB128 可変長整数。座標差分は zigzag):
+//!   エリア数, エリアごとに [長さ + UTF-8] × 4 (code, prefecture, city, ward)
+//!   ポリゴン数, ポリゴンごとに
+//!     エリア番号 (このタイル内), リング数, リングごとに
+//!       点数, 点ごとに dx, dy (タイル原点から STEP 度単位の座標の、前の点との差。閉じ点は含まない)
 
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::io::{self, BufReader, Write};
+use std::io::{self, BufReader};
 use std::path::Path;
 use std::time::Instant;
 
-// worker/src/tile.rs と同じ値にすること
+// worker/src/lookup.rs と同じ値にすること
 const TILES_PER_DEG: f64 = 10.0;
 const TILE_SIZE: f64 = 1.0 / TILES_PER_DEG;
-const EPS: f64 = 1e-7; // タイル境界ぴったりの点でも判定できるよう、切り取り範囲を少し広げる
-const MAGIC: &[u8; 4] = b"GTL1";
+const STEP: f64 = 1e-6; // 座標の量子化単位 (約 0.1m)
+const EPS: f64 = 2e-6; // タイル境界ぴったりの点でも判定できるよう、切り取り範囲を少し広げる
+const MAGIC: &[u8; 4] = b"GTP1";
+
+const M_PER_DEG: f64 = 6_371_008.8 * std::f64::consts::PI / 180.0;
 
 #[derive(Deserialize)]
 struct FeatureCollection {
@@ -64,15 +68,16 @@ struct Area {
 
 #[derive(Default)]
 struct Tile {
-    areas: Vec<usize>,              // タイル内エリア番号 -> 全体のエリア番号
+    areas: Vec<usize>,               // タイル内エリア番号 -> 全体のエリア番号
     area_index: HashMap<usize, u16>, // 全体のエリア番号 -> タイル内エリア番号
-    polygons: Vec<(u16, Vec<Vec<(f32, f32)>>)>,
+    polygons: Vec<(u16, Vec<Vec<(i32, i32)>>)>,
 }
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let input = args.get(1).map(String::as_str).unwrap_or("japan.geojson");
-    let out_dir = Path::new(args.get(2).map(String::as_str).unwrap_or("../worker/public/data"));
+    let output = Path::new(args.get(2).map(String::as_str).unwrap_or("../worker/data/tiles.pack"));
+    let tolerance_m: f64 = args.get(3).map_or(1.0, |s| s.parse().expect("tolerance must be a number (meters)"));
 
     let started = Instant::now();
     println!("Reading {input} ...");
@@ -83,6 +88,7 @@ fn main() -> io::Result<()> {
     let mut areas: Vec<Area> = Vec::new();
     let mut area_by_code: HashMap<String, usize> = HashMap::new();
     let mut tiles: HashMap<(i32, i32), Tile> = HashMap::new();
+    let (mut before, mut after) = (0usize, 0usize);
 
     for feature in &fc.features {
         let Some(geometry) = &feature.geometry else { continue };
@@ -103,37 +109,101 @@ fn main() -> io::Result<()> {
             Geometry::MultiPolygon(polys) => polys.iter().collect(),
         };
         for rings in polygons {
-            add_polygon(&mut tiles, area, rings);
+            before += rings.iter().map(|r| r.len().saturating_sub(1)).sum::<usize>(); // 閉じ点を除く
+            let rings: Vec<Vec<[f64; 2]>> = rings.iter().map(|r| simplify_ring(r, tolerance_m)).collect();
+            after += rings.iter().map(Vec::len).sum::<usize>();
+            add_polygon(&mut tiles, area, &rings);
         }
-    }
-    println!("  {} areas, {} tiles ({:.1}s)", areas.len(), tiles.len(), started.elapsed().as_secs_f64());
-
-    let tile_dir = out_dir.join("tiles");
-    if tile_dir.exists() {
-        fs::remove_dir_all(&tile_dir)?;
-    }
-    fs::create_dir_all(&tile_dir)?;
-
-    let (mut total, mut largest) = (0usize, (0usize, (0, 0)));
-    for (&(ix, iy), tile) in &tiles {
-        let bytes = encode_tile(tile, &areas);
-        total += bytes.len();
-        if bytes.len() > largest.0 {
-            largest = (bytes.len(), (ix, iy));
-        }
-        fs::File::create(tile_dir.join(format!("{ix}_{iy}.bin")))?.write_all(&bytes)?;
     }
     println!(
-        "Wrote {} tiles to {} : total {:.1} MB, largest {:.0} KB ({}_{}) ({:.1}s)",
+        "  simplified to {tolerance_m}m: {before} -> {after} vertices ({:.0}%), {} areas, {} tiles ({:.1}s)",
+        after as f64 / before as f64 * 100.0,
+        areas.len(),
         tiles.len(),
-        tile_dir.display(),
-        total as f64 / 1e6,
-        largest.0 as f64 / 1e3,
-        largest.1 .0,
-        largest.1 .1,
+        started.elapsed().as_secs_f64()
+    );
+
+    let encoded: BTreeMap<(i32, i32), Vec<u8>> = tiles.iter().map(|(&k, t)| (k, encode_tile(t, &areas))).collect();
+    let mut pack = Vec::new();
+    pack.extend_from_slice(MAGIC);
+    pack.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+    let mut offset = 0u32;
+    for (&(ix, iy), blob) in &encoded {
+        for v in [ix as u32, iy as u32, offset, blob.len() as u32] {
+            pack.extend_from_slice(&v.to_le_bytes());
+        }
+        offset += blob.len() as u32;
+    }
+    for blob in encoded.values() {
+        pack.extend_from_slice(blob);
+    }
+    if let Some(dir) = output.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    fs::write(output, &pack)?;
+    let largest = encoded.values().map(Vec::len).max().unwrap_or(0);
+    println!(
+        "Wrote {} : {} tiles, {:.1} MB, largest tile {:.0} KB ({:.1}s)",
+        output.display(),
+        encoded.len(),
+        pack.len() as f64 / 1e6,
+        largest as f64 / 1e3,
         started.elapsed().as_secs_f64()
     );
     Ok(())
+}
+
+/// 閉じたリングを Douglas–Peucker で間引く (許容誤差はメートル)。閉じ点は取り除いて返す。
+/// 間引くと 4 点未満になる小さな島などは元のまま残す。
+fn simplify_ring(ring: &[[f64; 2]], tolerance_m: f64) -> Vec<[f64; 2]> {
+    let mut pts = ring.to_vec();
+    if pts.len() > 1 && pts.first() == pts.last() {
+        pts.pop();
+    }
+    let n = pts.len();
+    if tolerance_m <= 0.0 || n < 8 {
+        return pts;
+    }
+    let kx = M_PER_DEG * pts[0][1].to_radians().cos();
+    let xy: Vec<(f64, f64)> = pts.iter().map(|p| (p[0] * kx, p[1] * M_PER_DEG)).collect();
+    let at = |i: usize| xy[i % n];
+    let dist2 = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).powi(2) + (a.1 - b.1).powi(2);
+
+    // リングを点 0 と、そこから最も遠い点で 2 本の折れ線に分けて、それぞれを間引く
+    let far = (1..n).max_by(|&a, &b| dist2(xy[0], xy[a]).total_cmp(&dist2(xy[0], xy[b]))).unwrap();
+    let mut keep = vec![false; n];
+    keep[0] = true;
+    keep[far] = true;
+    let mut stack = vec![(0, far), (far, n)]; // 添字 n は点 0 を指す
+    while let Some((s, e)) = stack.pop() {
+        let (a, b) = (at(s), at(e));
+        let (mut worst, mut wi) = (0.0, 0);
+        for i in s + 1..e {
+            let d = segment_dist2(at(i), a, b);
+            if d > worst {
+                worst = d;
+                wi = i;
+            }
+        }
+        if worst > tolerance_m * tolerance_m {
+            keep[wi] = true;
+            stack.push((s, wi));
+            stack.push((wi, e));
+        }
+    }
+    let out: Vec<[f64; 2]> = (0..n).filter(|&i| keep[i]).map(|i| pts[i]).collect();
+    if out.len() < 4 {
+        pts
+    } else {
+        out
+    }
+}
+
+fn segment_dist2(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
+    let (ex, ey) = (b.0 - a.0, b.1 - a.1);
+    let len2 = ex * ex + ey * ey;
+    let t = if len2 > 0.0 { (((p.0 - a.0) * ex + (p.1 - a.1) * ey) / len2).clamp(0.0, 1.0) } else { 0.0 };
+    (a.0 + t * ex - p.0).powi(2) + (a.1 + t * ey - p.1).powi(2)
 }
 
 fn add_polygon(tiles: &mut HashMap<(i32, i32), Tile>, area: usize, rings: &[Vec<[f64; 2]>]) {
@@ -155,14 +225,14 @@ fn add_polygon(tiles: &mut HashMap<(i32, i32), Tile>, area: usize, rings: &[Vec<
             let mut clipped = Vec::new();
             for (i, ring) in rings.iter().enumerate() {
                 let local: Vec<(f64, f64)> = ring.iter().map(|&[x, y]| (x - ox, y - oy)).collect();
-                let ring = clip_ring(&local, -EPS, TILE_SIZE + EPS);
+                let ring = quantize(&clip_ring(&local, -EPS, TILE_SIZE + EPS));
                 if ring.is_empty() {
                     if i == 0 {
                         break; // 外周がタイルに掛からなければ、穴も掛からない
                     }
                     continue;
                 }
-                clipped.push(ring.iter().map(|&(x, y)| (x as f32, y as f32)).collect());
+                clipped.push(ring);
             }
             if clipped.is_empty() {
                 continue;
@@ -181,9 +251,6 @@ fn add_polygon(tiles: &mut HashMap<(i32, i32), Tile>, area: usize, rings: &[Vec<
 /// 交点の座標は境界値をそのまま代入するので、切り取りで生じた辺の両端は境界値と完全に一致する。
 fn clip_ring(ring: &[(f64, f64)], lo: f64, hi: f64) -> Vec<(f64, f64)> {
     let mut pts: Vec<(f64, f64)> = ring.to_vec();
-    if pts.len() > 1 && pts.first() == pts.last() {
-        pts.pop();
-    }
     for side in 0..4 {
         if pts.is_empty() {
             break;
@@ -220,46 +287,66 @@ fn clip_ring(ring: &[(f64, f64)], lo: f64, hi: f64) -> Vec<(f64, f64)> {
         }
         pts = out;
     }
-    pts.dedup();
-    if pts.len() < 3 || ring_area(&pts).abs() < 1e-20 {
-        return Vec::new(); // 境界線に接しているだけの退化したリング
-    }
     pts
 }
 
-fn ring_area(pts: &[(f64, f64)]) -> f64 {
-    let mut sum = 0.0;
-    let mut prev = *pts.last().unwrap();
-    for &cur in pts {
-        sum += prev.0 * cur.1 - cur.0 * prev.1;
-        prev = cur;
+/// STEP 単位の整数座標にする。重なった点を除き、面積の無いリング (境界線に接しているだけ) は空にする。
+fn quantize(ring: &[(f64, f64)]) -> Vec<(i32, i32)> {
+    let mut q: Vec<(i32, i32)> = ring.iter().map(|&(x, y)| ((x / STEP).round() as i32, (y / STEP).round() as i32)).collect();
+    q.dedup();
+    while q.len() > 1 && q.first() == q.last() {
+        q.pop();
     }
-    sum / 2.0
+    let mut area2 = 0i64;
+    if let Some(&last) = q.last() {
+        let mut prev = last;
+        for &cur in &q {
+            area2 += prev.0 as i64 * cur.1 as i64 - cur.0 as i64 * prev.1 as i64;
+            prev = cur;
+        }
+    }
+    if q.len() < 3 || area2 == 0 {
+        return Vec::new();
+    }
+    q
 }
 
 fn encode_tile(tile: &Tile, areas: &[Area]) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.extend_from_slice(MAGIC);
-    buf.extend_from_slice(&(tile.areas.len() as u16).to_le_bytes());
+    varint(&mut buf, tile.areas.len() as u64);
     for &a in &tile.areas {
         let a = &areas[a];
         for s in [&a.code, &a.prefecture, &a.city, &a.ward] {
-            assert!(s.len() < 256, "name too long: {s}");
-            buf.push(s.len() as u8);
+            varint(&mut buf, s.len() as u64);
             buf.extend_from_slice(s.as_bytes());
         }
     }
-    buf.extend_from_slice(&(tile.polygons.len() as u32).to_le_bytes());
+    varint(&mut buf, tile.polygons.len() as u64);
     for (area, rings) in &tile.polygons {
-        buf.extend_from_slice(&area.to_le_bytes());
-        buf.extend_from_slice(&(rings.len() as u16).to_le_bytes());
+        varint(&mut buf, *area as u64);
+        varint(&mut buf, rings.len() as u64);
         for ring in rings {
-            buf.extend_from_slice(&(ring.len() as u32).to_le_bytes());
+            varint(&mut buf, ring.len() as u64);
+            let mut prev = (0, 0);
             for &(x, y) in ring {
-                buf.extend_from_slice(&x.to_le_bytes());
-                buf.extend_from_slice(&y.to_le_bytes());
+                for d in [x - prev.0, y - prev.1] {
+                    varint(&mut buf, ((d << 1) ^ (d >> 31)) as u32 as u64);
+                }
+                prev = (x, y);
             }
         }
     }
     buf
+}
+
+fn varint(buf: &mut Vec<u8>, mut v: u64) {
+    loop {
+        let b = (v & 0x7f) as u8;
+        v >>= 7;
+        if v == 0 {
+            buf.push(b);
+            return;
+        }
+        buf.push(b | 0x80);
+    }
 }
